@@ -1,215 +1,352 @@
-# ERP Stock Module
+# StockFlow
 
-A **production‑quality Inventory Module** built with ASP.NET Core, Clean Architecture, Entity Framework Core, SignalR, and SQL Server.  
-It solves real‑world warehouse challenges: batch‑level source tracking, concurrent sale conflicts, atomic multi‑warehouse transfers, real‑time low‑stock alerts, and high‑performance reporting.
+## Enterprise ERP Inventory & Warehouse Management System
+
+StockFlow is an inventory and warehouse management backend built with **ASP.NET Core 8**, **Clean Architecture**, **Entity Framework Core**, **SignalR**, and **SQL Server**.
+
+The system focuses on practical inventory-management challenges, including supplier-level stock traceability, FIFO allocation, concurrent sales, inter-warehouse transfers, real-time low-stock alerts, and inventory reporting.
 
 ---
 
 ## Table of Contents
 
-1. [Business Problems & Solutions](#business-problems--solutions)  
-   1.1 [Problem 1 – Tracking the Source of What They Sell](#problem-1--tracking-the-source-of-what-they-sell)  
-   1.2 [Problem 2 – Concurrent Sales and Stock Accuracy](#problem-2--concurrent-sales-and-stock-accuracy)  
-   1.3 [Problem 3 – Stock Transfers Between Warehouses](#problem-3--stock-transfers-between-warehouses)  
-   1.4 [Problem 4 – Real‑Time Visibility](#problem-4--real‑time-visibility)  
-   1.5 [Problem 5 – Reporting](#problem-5--reporting)  
-2. [Architectural Decisions & Trade‑offs](#architectural-decisions--trade-offs)  
-3. [Assumptions](#assumptions)  
-4. [Database Schema & Indexes](#database-schema--indexes)  
-5. [Running the Project Locally](#running-the-project-locally)  
-6. [API Endpoints (Swagger)](#api-endpoints-swagger)  
-7. [Testing](#testing)  
-8. [Technologies Used](#technologies-used)  
-9. [Repository Structure (Clean Architecture)](#repository-structure-clean-architecture)  
-10. [Future Improvements](#future-improvements)
+- [Overview](#overview)
+- [Core Features](#core-features)
+- [Business Workflows](#business-workflows)
+  - [Lot-Based Inventory Tracking and FIFO](#1-lot-based-inventory-tracking-and-fifo)
+  - [Concurrency-Safe Sales](#2-concurrency-safe-sales)
+  - [Inter-Warehouse Transfers](#3-inter-warehouse-transfers)
+  - [Real-Time Low-Stock Alerts](#4-real-time-low-stock-alerts)
+  - [Inventory Reporting](#5-inventory-reporting)
+- [Architecture and Design Decisions](#architecture-and-design-decisions)
+- [Database Design and Indexes](#database-design-and-indexes)
+- [Technology Stack](#technology-stack)
+- [Getting Started](#getting-started)
+- [API Overview](#api-overview)
+- [Testing](#testing)
+- [Project Structure](#project-structure)
+- [Current Scope and Assumptions](#current-scope-and-assumptions)
+- [Potential Enhancements](#potential-enhancements)
 
 ---
 
-## Business Problems & Solutions
+## Overview
 
-### Problem 1 – Tracking the Source of What They Sell
-**Requirement**  
-The client purchases the same product from different suppliers. They need to know exactly which purchase a sold quantity came from and which supplier provided it.
+StockFlow is designed to help manage inventory across multiple warehouses while maintaining accurate stock levels and a clear history of inventory movements.
 
-**Solution**  
-Implemented **Lot‑based tracking with FIFO allocation**.  
-- Every incoming shipment creates a `Lot` record (`ProductId`, `SupplierId`, `WarehouseId`, `RemainingQuantity`, `UnitCost`, `ReceivedDate`).  
-- When a sale occurs, the system allocates stock from the oldest lot first (FIFO).  
-- Each `StockTransaction` is linked to a specific `Lot`, so every sold item can be traced back to its original purchase.  
-- Reports answer questions like *“How much of Product X was sold from Supplier Y?”* or *“Remaining stock from the March shipment?”*.
+Its main capabilities include:
 
-### Problem 2 – Concurrent Sales and Stock Accuracy
-**Requirement**  
-Multiple staff sell simultaneously. Negative stock occurred when two users sold the same available quantity at the same time.
+- Tracking received inventory by product, supplier, warehouse, and lot.
+- Allocating stock using the **First-In, First-Out (FIFO)** method.
+- Preventing overselling when multiple sales attempt to use the same available stock.
+- Recording stock transfers between warehouses.
+- Sending real-time alerts when stock falls below a configured threshold.
+- Providing filtered and paginated inventory movement reports.
 
-**Solution**  
-Three‑layer defence against over‑selling:  
-1. **Atomic conditional update** – `UPDATE … WHERE RemainingQuantity >= @qty`. If the condition fails, zero rows are affected and the sale is rejected.  
-2. **Pessimistic locking** – `SELECT … WITH (UPDLOCK, HOLDLOCK)` serialises access to the same lots within a transaction.  
-3. **Database transaction** – every sale runs inside `BeginTransactionAsync` / `CommitAsync`. Any failure rolls back all changes.  
+## Core Features
 
-A concurrent integration test (see [Testing](#testing)) proves that only one of two simultaneous sales on the last unit succeeds, and stock never becomes negative.
-
-### Problem 3 – Stock Transfers Between Warehouses
-**Requirement**  
-Frequent manual transfers caused mismatched quantities (source recorded “sent”, destination never recorded “received”).
-
-**Solution**  
-**Two‑phase transfer with atomic database transactions**:  
-- **Phase 1 (Send)**: Creates a `TransferOrder` (status `Pending`) and deducts stock from the source warehouse.  
-- **Phase 2 (Receive)**: On arrival, the destination confirms receipt. A new `Lot` is created in the destination warehouse.  
-- Both phases run in separate transactions. If a network failure occurs mid‑way, the uncommitted transaction is rolled back automatically.  
-- The system **rejects a received quantity that does not match the sent quantity**, keeping the transfer pending until the discrepancy is resolved. This guarantees consistent stock levels between warehouses.
-
-### Problem 4 – Real‑Time Visibility
-**Requirement**  
-Managers want to see stock changes instantly and be notified when a product falls below a configurable threshold.
-
-**Solution**  
-- `StockThreshold` table stores a configurable minimum quantity per product/warehouse.  
-- After every sale, transfer, or receipt, `NotificationService` checks the remaining quantity.  
-- When it drops below the threshold, an alert is:  
-  - **Pushed instantly** via SignalR (`ReceiveAlert`) to all connected manager clients.  
-  - **Persisted** in the `Notifications` table (accessible via `GET /api/Notifications`).  
-- A simple HTML page (provided in the repository) demonstrates real‑time alerts without any page refresh.
-
-### Problem 5 – Reporting
-**Requirement**  
-Provide reporting endpoints that filter by warehouse, supplier, date range, and that perform well with large data.
-
-**Solution**  
-Two REST endpoints:  
-- `GET /api/Reports/movements` – detailed, paginated list of stock movements.  
-- `GET /api/Reports/summary` – aggregated total in/out per product.  
-**Performance optimisations:**  
-- `AsNoTracking()` for read‑only queries.  
-- Projection to lightweight DTOs.  
-- **Indexes** on `TransactionDate`, `LotId`, and composite `(ProductId, WarehouseId)`.  
-- **Pagination** with `Skip/Take` and `TotalCount`.
+| Feature | Description |
+|---|---|
+| Product and supplier management | Maintain product, supplier, and warehouse records. |
+| Lot-based tracking | Trace stock back to the lot and supplier from which it was received. |
+| FIFO allocation | Allocate older inventory lots before newer lots. |
+| Concurrency-safe sales | Protect stock quantities during simultaneous sales. |
+| Warehouse transfers | Track stock sent from one warehouse and received at another. |
+| Low-stock notifications | Detect threshold breaches and publish alerts through SignalR. |
+| Inventory reports | Retrieve stock movements and product-level in/out summaries. |
+| API documentation | Explore and test endpoints through Swagger. |
 
 ---
 
-## Architectural Decisions & Trade‑offs
+## Business Workflows
 
-| Decision | Reason | Trade‑off |
-|----------|--------|-----------|
-| **Clean Architecture** (Domain / Application / Infrastructure / API) | Clear separation of concerns, testability. | Adds initial project complexity. |
-| **Generic Repository (`IRepository<T>`)** | Eliminates repetitive CRUD code. | May need specific repositories for complex queries. |
-| **FIFO allocation** | Prevents stock aging, simplest physical flow. | Can be extended to LIFO or manual selection later. |
-| **Pessimistic locking (`UPDLOCK, HOLDLOCK`)** | Absolute guarantee against double‑selling. | Slightly reduces concurrency under extreme load; lock scope is minimal (single product/warehouse). |
-| **Two‑phase transfers with strict quantity match** | Strong consistency between warehouses. | Requires manual resolution when received quantity differs. |
-| **SignalR** | Native ASP.NET Core real‑time solution. | Requires WebSocket‑compatible client. |
-| **`int` primary keys** | Faster development, smaller indexes. | Less suitable for distributed systems. Architecture is ready to switch to `Guid` when needed. |
+### 1. Lot-Based Inventory Tracking and FIFO
+
+**Problem:** The same product may be purchased from different suppliers at different times. Inventory records should make it possible to identify the source of the stock that was sold.
+
+**Implementation:**
+
+- Each incoming shipment creates a `Lot` record containing details such as `ProductId`, `SupplierId`, `WarehouseId`, `RemainingQuantity`, `UnitCost`, and `ReceivedDate`.
+- When a sale is processed, the system allocates available stock from the oldest lot first using FIFO.
+- Each `StockTransaction` is associated with the relevant lot.
+- This transaction history supports supplier-level and shipment-level stock traceability.
+
+Examples of questions supported by this model include:
+
+- How much of a product was sold from a particular supplier?
+- How much stock remains from a specific shipment?
+
+### 2. Concurrency-Safe Sales
+
+**Problem:** When multiple users sell the same product at the same time, each request may try to consume the same available quantity. Without proper concurrency controls, this can lead to negative or inaccurate stock.
+
+**Implementation:** Stock allocation uses multiple safeguards:
+
+1. **Conditional updates:** An update checks that `RemainingQuantity >= @qty` before deducting stock. If the condition is not met, the update affects no rows and the sale cannot consume unavailable stock.
+2. **Pessimistic locking:** SQL Server locking hints such as `UPDLOCK` and `HOLDLOCK` help serialize access to the relevant lots during a transaction.
+3. **Database transactions:** Sale operations run inside a database transaction. Changes are committed only when the operation succeeds; failures are rolled back.
+
+A concurrent-sale integration test checks that when two requests attempt to sell the final available unit, only one succeeds and the stock quantity does not become negative.
+
+### 3. Inter-Warehouse Transfers
+
+**Problem:** Manual stock transfers can leave inventory records inconsistent when stock is marked as sent at the source warehouse but is not properly recorded at the destination.
+
+**Implementation:** Stock transfers follow a two-step workflow:
+
+1. **Send:** A `TransferOrder` is created with a `Pending` status, and the quantity is deducted from the source warehouse.
+2. **Receive:** When the transfer arrives, the destination warehouse confirms receipt. The received quantity is recorded as a new lot at the destination.
+3. **Transaction handling:** The send and receive operations each use database transactions so that changes within an individual operation are committed or rolled back together.
+4. **Quantity validation:** A received quantity that does not match the sent quantity is rejected. The transfer remains pending until the discrepancy is resolved.
+
+The source lot and its supplier history remain traceable through the stock transaction records. For a transfer-created lot, `SupplierId` is `null` because the transferred quantity may include stock from multiple suppliers.
+
+### 4. Real-Time Low-Stock Alerts
+
+**Problem:** Warehouse teams need timely visibility when inventory falls below a minimum level.
+
+**Implementation:**
+
+- The `StockThreshold` table stores a configurable minimum quantity for each product and warehouse.
+- After a sale, transfer, or stock receipt, the notification service checks the remaining quantity against the configured threshold.
+- When stock falls below the threshold, an alert is pushed to connected clients through **SignalR** using the `ReceiveAlert` event.
+- Alerts are also persisted in the `Notifications` table and can be retrieved through `GET /api/Notifications`.
+- The project includes a simple HTML page to demonstrate real-time notifications without refreshing the page.
+
+### 5. Inventory Reporting
+
+The reporting functionality provides endpoints for retrieving inventory movements and product-level stock summaries.
+
+**Available reports:**
+
+- `GET /api/Reports/movements` — returns a paginated list of stock movements.
+- `GET /api/Reports/summary` — returns aggregated incoming and outgoing quantities per product.
+
+**Query and performance considerations:**
+
+- Read-only queries use `AsNoTracking()`.
+- DTO projections limit the data returned by reporting queries.
+- Pagination uses `Skip` and `Take`, along with a total record count.
+- Database indexes support common date filters, joins, and product/warehouse lookups.
 
 ---
 
-## Assumptions
+## Architecture and Design Decisions
 
-- Default stock allocation is **FIFO**.  
-- A sale can contain multiple products but is fulfilled from a **single warehouse**.  
-- Stock transfers are **inter‑warehouse**; supplier information is preserved on the source lot.  
-- The `SupplierId` of a transfer‑created lot is `null` because the quantity may come from multiple suppliers. Original suppliers can be traced via `StockTransaction` records.  
-- `StockThreshold` is defined **per product per warehouse**.  
-- Reporting is for inventory movements; financial reporting is out of scope.  
-- Authentication/authorisation is not implemented – the API should be placed behind an identity provider in production.  
-- The database key design (currently `int`) can be migrated to `Guid` when required; all entities inherit from a base `AuditableEntity` where the key type is centralised.
+StockFlow follows Clean Architecture to separate business rules, application logic, infrastructure concerns, and API delivery.
+
+| Design decision | Why it is used | Trade-off |
+|---|---|---|
+| Clean Architecture | Separates Domain, Application, Infrastructure, and API responsibilities and supports testability. | Introduces more initial structure and project setup. |
+| Generic repository (`IRepository<T>`) | Reduces repetitive CRUD implementation. | Complex queries may need dedicated repository methods. |
+| FIFO allocation | Prioritizes older inventory lots and provides a straightforward stock-allocation flow. | Other allocation strategies would require additional logic. |
+| SQL Server locking (`UPDLOCK`, `HOLDLOCK`) | Helps prevent concurrent requests from allocating the same stock. | Locking can reduce concurrency under heavy contention. |
+| Conditional stock updates | Ensures a quantity is available before it is deducted. | Requires callers to handle failed updates as insufficient stock. |
+| Two-step warehouse transfers | Separates dispatch from destination receipt and records the transfer lifecycle. | Quantity discrepancies require resolution before completion. |
+| SignalR | Provides real-time notifications using ASP.NET Core infrastructure. | Clients need a compatible real-time connection. |
+| Integer primary keys | Keeps the current data model straightforward. | A distributed deployment may benefit from a different key strategy. |
 
 ---
 
-## Database Schema & Indexes
+## Database Design and Indexes
 
 ### Core tables
-`Products`, `Suppliers`, `Warehouses`, `Lots`, `StockTransactions`, `TransferOrders`, `TransferItems`, `StockThresholds`, `Notifications`
 
-All entities inherit from `AuditableEntity` which provides:  
-- `Id`, `CreatedAt`, `CreatedBy`, `ModifiedAt`, `ModifiedBy`, `IsDeleted` (soft delete).
+The database includes the following main tables:
+
+- `Products`
+- `Suppliers`
+- `Warehouses`
+- `Lots`
+- `StockTransactions`
+- `TransferOrders`
+- `TransferItems`
+- `StockThresholds`
+- `Notifications`
+
+### Auditing fields
+
+Entities inherit from `AuditableEntity`, which provides common fields:
+
+- `Id`
+- `CreatedAt`
+- `CreatedBy`
+- `ModifiedAt`
+- `ModifiedBy`
+- `IsDeleted` (soft-delete indicator)
 
 ### Indexes
-I created indexes on columns that are frequently used in filters and joins to ensure reports stay fast even with millions of rows.
-- Index on `TransactionDate` in `StockTransactions` for fast date‑range filtering.
-- Index on `LotId` in `StockTransactions` to speed up JOINs with `Lots`.
-- Composite index on `(ProductId, WarehouseId)` in `Lots` to quickly find available stock.
-- Index on `SupplierId` in `Lots` for supplier‑based reports.
-- Index on `TransferOrderId` in `TransferItems` to retrieve all items of a transfer.
-- Composite index on `(ProductId, WarehouseId)` in `StockThresholds` for instant threshold lookup.
+
+Indexes are configured to support frequently used filters and relationships:
+
+| Table | Indexed column(s) | Purpose |
+|---|---|---|
+| `StockTransactions` | `TransactionDate` | Supports date-range filtering. |
+| `StockTransactions` | `LotId` | Supports joins between transactions and lots. |
+| `Lots` | `(ProductId, WarehouseId)` | Helps locate available stock by product and warehouse. |
+| `Lots` | `SupplierId` | Supports supplier-based inventory queries. |
+| `TransferItems` | `TransferOrderId` | Supports retrieval of items belonging to a transfer. |
+| `StockThresholds` | `(ProductId, WarehouseId)` | Supports threshold lookup for a product at a warehouse. |
 
 ---
 
-## Running the Project Locally
+## Technology Stack
+
+| Area | Technologies |
+|---|---|
+| Backend | C#, ASP.NET Core 8 Web API |
+| Architecture | Clean Architecture, Domain-Driven separation of responsibilities |
+| Data access | Entity Framework Core 8 |
+| Database | Microsoft SQL Server |
+| Real-time communication | SignalR |
+| Logging | Serilog |
+| API documentation | Swagger / Swashbuckle |
+| Testing | xUnit |
+
+---
+
+## Getting Started
 
 ### Prerequisites
-- .NET 8 SDK  
-- SQL Server (LocalDB, Express, or Developer edition)
 
-### Steps
-1. Clone the repository.  
-2. Open `ERP-Stock-Module/appsettings.json` and update the `Stock` connection string to point to your SQL Server instance.  
-3. Open **Package Manager Console** in Visual Studio (Tools → NuGet Package Manager → Package Manager Console).  
-4. Run the following commands to create the database and apply migrations:
-   ```
-   Add-Migration InitialCreate -StartupProject ERP-Stock-Module -Project Infrastructure
-   Update-Database -StartupProject ERP-Stock-Module -Project Infrastructure
-   ```
-5. Run the application by pressing **F5** or using:
-   ```
-   dotnet run --project ERP-Stock-Module
-   ```
-6. Open `https://localhost:7213/swagger` (or the URL printed in the console).  
-   The database is automatically seeded with sample data (`DbInitializer`).
+Make sure the following tools are installed:
+
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+- SQL Server (LocalDB, Express, or Developer edition)
+- Visual Studio with the NuGet Package Manager, or another compatible .NET development environment
+
+### 1. Clone the repository
+
+```bash
+git clone <your-repository-url>
+cd <your-repository-folder>
+```
+
+Replace the placeholders with your repository URL and local folder name.
+
+### 2. Configure the database connection
+
+Open `ERP-Stock-Module/appsettings.json` and update the `Stock` connection string to point to your SQL Server instance.
+
+Do not commit production credentials or private connection strings to source control.
+
+### 3. Apply Entity Framework migrations
+
+Open **Package Manager Console** in Visual Studio:
+
+`Tools → NuGet Package Manager → Package Manager Console`
+
+Run:
+
+```powershell
+Add-Migration InitialCreate -StartupProject ERP-Stock-Module -Project Infrastructure
+Update-Database -StartupProject ERP-Stock-Module -Project Infrastructure
+```
+
+### 4. Run the application
+
+From Visual Studio, set `ERP-Stock-Module` as the startup project and run it, or execute:
+
+```bash
+dotnet run --project ERP-Stock-Module
+```
+
+### 5. Open Swagger
+
+After the application starts, open the Swagger URL shown in the console. The configured local URL may be:
+
+```text
+https://localhost:7213/swagger
+```
+
+The database is seeded with sample data through `DbInitializer` when the application starts.
 
 ---
 
-## API Endpoints (Swagger)
+## API Overview
 
-Access Swagger at `/swagger` after starting the project.
+The API can be explored through Swagger after the application is running.
 
-The API groups are:
-- **Admin** – CRUD for products, suppliers, warehouses, and stock thresholds.
-- **Sales** – `POST /api/Sales` to execute a sale.
-- **Transfers** – `POST /api/Transfers` to send a transfer; `PUT …/items/{id}/receive` to confirm receipt.
-- **Reports** – `GET /api/Reports/movements` (paginated), `GET /api/Reports/summary`.
-- **Notifications** – `GET /api/Notifications` to view stored alerts.
-- **Stock** – `GET /api/Stock/levels` for current quantities; `POST /api/Stock/receive` to record incoming stock.
+| API area | Endpoint | Purpose |
+|---|---|---|
+| Admin | Product, supplier, warehouse, and stock-threshold endpoints | Manage core inventory records and threshold settings. |
+| Sales | `POST /api/Sales` | Process a sale and allocate stock. |
+| Transfers | `POST /api/Transfers` | Create and send a warehouse transfer. |
+| Transfers | `PUT /api/Transfers/.../items/{id}/receive` | Confirm receipt of a transfer item. |
+| Reports | `GET /api/Reports/movements` | Retrieve paginated inventory movements. |
+| Reports | `GET /api/Reports/summary` | Retrieve aggregated in/out quantities per product. |
+| Notifications | `GET /api/Notifications` | Retrieve persisted low-stock notifications. |
+| Stock | `GET /api/Stock/levels` | Retrieve current stock levels. |
+| Stock | `POST /api/Stock/receive` | Record incoming stock. |
+
+The exact request and response models can be inspected in the Swagger documentation.
 
 ---
 
 ## Testing
 
-- **Concurrent sale test**: Located in `Tests/ConcurrentSaleTests.cs`. It simulates two simultaneous allocations on a lot with quantity 1 and verifies that only one succeeds, the other fails with “insufficient stock”, and the remaining quantity stays at 0.  
-- Run tests from the **Test Explorer** or using:
-  ```
-  dotnet test
-  ```
+The project includes a concurrent-sale test in:
 
----
-
-## Technologies Used
-
-- ASP.NET Core 8 (Web API)  
-- Entity Framework Core 8 with SQL Server  
-- SignalR for real‑time notifications  
-- Serilog for structured logging  
-- xUnit for tests  
-- Swashbuckle (Swagger) for API documentation
-
----
-
-## Repository Structure (Clean Architecture)
-
-```
-ERP-Stock-Module
-├── Domain          – Entities, enums
-├── Application     – DTOs, IService (interfaces)
-├── Infrastructure  – DbContext, Service (implementations), SignalR hub, Migrations
-├── ERP-Stock-Module – Web API (Controllers, Program.cs)
-└── Tests           – xUnit test project
+```text
+Tests/ConcurrentSaleTests.cs
 ```
 
+The test simulates two simultaneous attempts to allocate the last available unit. It verifies that only one sale succeeds, the other is rejected due to insufficient stock, and the remaining quantity does not become negative.
+
+Run the test suite from the repository root:
+
+```bash
+dotnet test
+```
+
+You can also run the tests through **Test Explorer** in Visual Studio.
+
 ---
 
-## Future Improvements
+## Project Structure
 
-- **Guid keys**: Migrate primary keys from `int` to `Guid` for better distribution and security.  
-- **Docker support**: Add `Dockerfile` and `docker-compose.yml` for containerised deployment.    
+The solution is organized into the following Clean Architecture layers:
 
-*Developed as part of a technical assessment for an ERP Inventory Module.*
+```text
+<repository-root>/
+├── Domain/
+│   └── Entities, enums, and core domain models
+├── Application/
+│   └── DTOs and service interfaces
+├── Infrastructure/
+│   └── DbContext, service implementations, SignalR hub, and migrations
+├── ERP-Stock-Module/
+│   └── Web API controllers and Program.cs
+└── Tests/
+    └── xUnit test project
+```
+
+The structure shows the logical Clean Architecture layers. The API startup project and directory are named `ERP-Stock-Module` in the current setup commands.
+
+---
+
+## Current Scope and Assumptions
+
+The implementation currently follows these assumptions:
+
+- FIFO is the default stock-allocation strategy.
+- A sale may contain multiple products, but it is fulfilled from a single warehouse.
+- Stock transfers are between warehouses.
+- Supplier information is retained on the source lot; a transfer-created lot can have a `null` `SupplierId` when stock from multiple suppliers is combined.
+- Stock thresholds are configured per product per warehouse.
+- Reporting focuses on inventory movements and quantities. Financial reporting is outside the current scope.
+- Authentication and authorization are not implemented in the current version. A production deployment should place the API behind an appropriate identity provider and enforce access controls.
+- Primary keys currently use `int`. The key strategy can be revisited if distributed-system requirements make it necessary.
+
+---
+
+## Potential Enhancements
+
+Possible next steps for the project include:
+
+- **GUID-based keys:** Evaluate migrating primary keys from `int` to `Guid` if the deployment model requires globally unique identifiers.
+- **Docker support:** Add a `Dockerfile` and `docker-compose.yml` to simplify local setup and deployment.
+- **Authentication and authorization:** Integrate an identity provider and add role-based access controls before exposing the API in a production environment.
+
+---
+
